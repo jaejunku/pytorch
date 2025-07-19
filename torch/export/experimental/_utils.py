@@ -1,9 +1,12 @@
+import logging
 import typing
 
+import torch
 from torch._inductor.utils import IndentedBuffer
 
 
 __all__ = []  # type: ignore[var-annotated]
+logger = logging.getLogger(__name__)
 
 
 def _get_main_cpp_file(
@@ -125,8 +128,10 @@ def _get_main_cpp_file(
                     [
                         f"auto constants_map{i + 1} = std::make_shared<ConstantMap>();",
                         f"auto constants_array{i + 1} = std::make_shared<std::vector<ConstantHandle>>();",
-                        f"auto model{i + 1} = AOTInductorModel{model_name}::Create(",
-                        f"    constants_map{i + 1}, constants_array{i + 1}, device_str,",
+                        f"auto model{i + 1} = std::make_unique<AOTInductorModel{model_name}>(",
+                        f"    std::move(constants_map{i + 1}),",
+                        f"    std::move(constants_array{i + 1}),",
+                        "    device_str,",
                         f'    "{package_name}/data/aotinductor/{model_name}/");',
                         f"model{i + 1}->load_constants();",
                     ]
@@ -154,7 +159,7 @@ def _get_main_cpp_file(
                 ib.writeline("\n// Validate outputs")
                 for i in range(len(model_names)):
                     ib.writeline(
-                        f"""std::cout << "output_tensor{i + 1}" << output_tensor{i + 1} << std::endl;"""
+                        f"""std::cout << "output_tensor{i + 1}\\n" << output_tensor{i + 1} << std::endl;"""
                     )
 
             ib.writeline("return 0;")
@@ -200,7 +205,50 @@ def _get_make_file(package_name: str, model_names: list[str], cuda: bool) -> str
 
     model_libs = " ".join(model_names)
     ib.writeline(f"target_link_libraries(main PRIVATE torch {model_libs})")
+
     if cuda:
         ib.writeline("target_link_libraries(main PRIVATE cuda ${CUDA_LIBRARIES})")
 
     return ib.getvalue()
+
+
+def _extract_tensor_from_compiled_output(
+    cpp_output: str, dtype: torch.dtype
+) -> torch.Tensor:
+    """Extracts a tensor from the printed output of main.cpp
+
+    Example input string:
+
+    output_tensor1
+    -1.1291 -0.1047 -0.2808
+    -1.1291 -0.1047 -0.2808
+    -1.1291 -0.1047 -0.2808
+    [ CPUFloatType{3,3} ]
+
+    Example output tensor:
+
+    -1.1291 -0.1047 -0.2808
+    -1.1291 -0.1047 -0.2808
+    -1.1291 -0.1047 -0.2808
+
+    """
+    try:
+        value_lines = []
+        for line in cpp_output.strip().split("\n"):
+            if (
+                not line.startswith("[")
+                and not line.endswith("]")
+                and "output_tensor" not in line
+            ):
+                value_lines.append(line)
+
+        # Parse the values into a list of lists
+        parsed_values = []
+        for line in value_lines:
+            parsed_values.append([float(v) for v in line.split(" ")])
+
+        return torch.tensor(parsed_values, dtype=dtype)
+    except Exception:
+        logger.error(msg="Failed to extract tensor from compiled output")
+        logger.error(msg=cpp_output)
+        raise

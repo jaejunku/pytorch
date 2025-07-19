@@ -5,6 +5,7 @@ import torch
 from torch._dynamo.eval_frame import is_dynamo_supported
 from torch.export import Dim
 from torch.export.experimental import _ExportPackage
+from torch.export.experimental._utils import _extract_tensor_from_compiled_output
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
@@ -88,6 +89,27 @@ class TestPackage(TestCase):
         self.assertEqual(exporter(x3), x3 + 2)
         self.assertEqual(len(package.methods), 1)
         self.assertEqual(len(package.methods["fn"].overloads), 3)
+
+
+class TestUtils(TestCase):
+    def test_extract_tensor_from_compiled_output(self):
+        input_string = (
+            "output_tensor1\n-1.1291 -0.1047 -0.2808\n-1.1291 -0.1047 -0.2808\n"
+            "-1.1291 -0.1047 -0.2808\n[ CPUFloatType{3,3} ]\n"
+        )
+
+        output_tensor = _extract_tensor_from_compiled_output(
+            input_string, torch.float32
+        )
+        tensor = torch.tensor(
+            [
+                [-1.1291, -0.1047, -0.2808],
+                [-1.1291, -0.1047, -0.2808],
+                [-1.1291, -0.1047, -0.2808],
+            ]
+        )
+
+        self.assertEqual(output_tensor, tensor)
 
 
 if __name__ == "__main__":
