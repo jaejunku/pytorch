@@ -40,26 +40,14 @@ import torch._C
 import torch._refs
 import torch.fx
 import torch.nn
-from torch._guards import TracingContext
 from torch._logging import warning_once
-from torch.utils._python_dispatch import is_traceable_wrapper_subclass_type
 
 from .. import config, graph_break_hints, polyfills, variables
 from ..codegen import PyCodegen
-from ..create_parameter_op import (
-    can_convert_to_tracable_parameter,
-    new_parameter_placeholder,
-    tracable_create_parameter,
-)
 from ..device_interface import get_registered_device_interfaces
 from ..exc import unimplemented_v2
 from ..guards import GuardBuilder, install_guard
-from ..source import (
-    AttrSource,
-    CallFunctionNoArgsSource,
-    SyntheticLocalSource,
-    TorchSource,
-)
+from ..source import AttrSource, CallFunctionNoArgsSource, TorchSource
 from ..utils import (
     check_unspec_or_constant_args,
     guard_if_dyn,
@@ -81,7 +69,6 @@ from .lists import ListVariable, TupleVariable
 from .torch_function import (
     can_dispatch_torch_function,
     dispatch_torch_function,
-    TensorWithTFOverrideVariable,
     TorchFunctionModeStackVariable,
 )
 
@@ -748,7 +735,15 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
 
         @register(torch.nn.Parameter)
         def handle_parameter(self, tx: "InstructionTranslator", *args, **kwargs):
-            return self.call_nn_parameter(tx, *args, **kwargs)
+            unimplemented_v2(
+                gb_type="Attempted to use `torch.nn.Parameter()` constructor with Dynamo",
+                context="",
+                explanation="Dynamo does not support this.",
+                hints=[
+                    "Construct `torch.nn.Parameter()` outside the compiled region.",
+                    *graph_break_hints.SUPPORTABLE,
+                ],
+            )
 
         @register(torch.ops.aten.sym_size, torch.ops.aten.sym_size.int)
         def handle_sym_size(self_, tx, self, dim=None):
@@ -1645,162 +1640,6 @@ For now, dynamo will explicitly graph break when it encounters user code with th
             return variables.LambdaVariable(handle_ntuple)
         else:
             return handle_ntuple(args[0])
-
-    @classmethod
-    def call_nn_parameter(cls, tx, data=None, requires_grad=True):
-        """A call to torch.nn.Parameter() gets lifted to before the graph"""
-        if tx.export:
-            unimplemented_v2(
-                gb_type="Attempted to use `torch.nn.Parameter()` with export",
-                context="",
-                explanation="Dynamo does not support this.",
-                hints=[
-                    "Do not use `torch.nn.Parameter()` with export.",
-                    *graph_break_hints.SUPPORTABLE,
-                ],
-            )
-
-        if isinstance(requires_grad, variables.VariableTracker):
-            try:
-                requires_grad = requires_grad.as_python_constant()
-            except NotImplementedError:
-                unimplemented_v2(
-                    gb_type="non-constant `requires_grad` argument to `torch.nn.Parameter`",
-                    context=f"requires_grad={requires_grad}",
-                    explanation="Dynamo does not support this.",
-                    hints=[
-                        "Change `requires_grad` to be a bool.",
-                        *graph_break_hints.USER_ERROR,
-                    ],
-                )
-
-        if not isinstance(data, variables.TensorVariable):
-            unimplemented_v2(
-                gb_type="`torch.nn.Parameter()` with unsupported data type",
-                context=f"data={data}",
-                explanation="Called `torch.nn.Parameter()` with non-Tensor argument.",
-                hints=[
-                    "Ensure the argument to `torch.nn.Parameter()` is a `torch.Tensor`.",
-                    *graph_break_hints.USER_ERROR,
-                ],
-            )
-
-        # this results in cleaner graphs, but only works for inputs
-        if data.source:
-            return cls._nn_param_via_prefix_insert(tx, data, requires_grad)
-
-        if isinstance(
-            data, TensorWithTFOverrideVariable
-        ) or is_traceable_wrapper_subclass_type(data.class_type):
-            unimplemented_v2(
-                gb_type="Attempted to use torch.nn.Parameter constructor with tensor subclass",
-                context=str(data),
-                explanation="Dynamo does not support this.",
-                hints=[
-                    *graph_break_hints.SUPPORTABLE,
-                ],
-            )
-
-        if not can_convert_to_tracable_parameter():
-            unimplemented_v2(
-                gb_type="`torch.nn.Parameter`: cannot convert to traceable tracable",
-                context="",
-                explanation="convert_tracable_parameter is set to False.",
-                hints=[
-                    "Check usage of context manager: do_not_convert_to_tracable_parameter",
-                    *graph_break_hints.DIFFICULT,
-                ],
-            )
-
-        try:
-            shape = tuple(data.var_getattr(tx, "shape").as_python_constant())
-            dtype = data.var_getattr(tx, "dtype").as_python_constant()
-            device = data.var_getattr(tx, "device").as_python_constant()
-        except NotImplementedError as e:
-            unimplemented_v2(
-                gb_type="`torch.nn.Parameter` with non-constant Tensor attributes",
-                context=f"data={data}",
-                explanation="Dynamo does not support this.",
-                hints=[
-                    "Ensure the Tensor argument's shape, dtype, and device are correct.",
-                    *graph_break_hints.USER_ERROR,
-                ],
-                from_exc=e,
-            )
-
-        placeholder = tx.output.synthetic_graph_input(
-            new_parameter_placeholder, [shape, dtype, device, requires_grad]
-        )
-        if data.requires_grad:
-            data = data.call_method(tx, "detach", [], {})
-
-        from .builder import wrap_fx_proxy
-
-        result = wrap_fx_proxy(
-            tx,
-            tx.output.create_proxy(
-                "call_function",
-                tracable_create_parameter,
-                (data.as_proxy(), placeholder.as_proxy()),
-                {},
-            ),
-            # In reconstruct() we should use the original parameter. The one
-            # returned by the graph will be an alias.
-            source=placeholder.source,
-        )
-        assert isinstance(result, variables.TensorVariable)
-        result.class_type = torch.nn.Parameter
-
-        # TODO(jansel/bdhirsh) - There is some issue with
-        # tracable_create_parameter. It does not seem to use the right
-        # grad_enabled. Since this is parameter, we can just override the
-        # has_grad_fn field to False to workaround the issue.
-        result.has_grad_fn = False
-
-        # TODO(jansel): if the new param falls out of scope, currently it won't get freed until
-        # the end of the graph.  We should fix this.
-        return result
-
-    @staticmethod
-    def _nn_param_via_prefix_insert(tx: "InstructionTranslator", data, requires_grad):
-        # Alternate version if we have a .source
-        varname = tx.output.new_var()
-
-        # construct the nn.Parameter before the graph save it to varname
-        assert tx.output.root_tx is not None
-        cg = PyCodegen(tx.output.root_tx)
-        cg.add_push_null(lambda: cg.load_import_from("torch.nn", "Parameter"))
-        cg(data.source)
-        cg(variables.ConstantVariable(requires_grad))
-        cg.call_function(2, False)
-        cg.store(varname)
-        tx.output.pregraph_bytecode.extend(cg.get_instructions())
-
-        data_node = data.as_proxy().node
-        if data_node.op not in ("placeholder", "get_attr"):
-            unimplemented_v2(
-                gb_type="Unexpected type of data placeholder op for parameter construction",
-                context=f"data_node.op={data_node.op}",
-                explanation="Data node op should be placeholder or get_attr.",
-                hints=[
-                    *graph_break_hints.DIFFICULT,
-                ],
-            )
-
-        # add the newly constructed nn.Parameter as a graph input
-        source = SyntheticLocalSource(varname)
-        example_value = torch.nn.Parameter(
-            tx.output.example_value_from_input_node(data.as_proxy().node)
-        )
-        result = VariableTracker.build(tx, example_value, source)
-        # Realize the VT because we will delete the guards on it in the next line.
-        result = result.realize()
-        # No need to guard on this since we already guarded on `data`.
-        # These guards would fail since varname doesn't exist until after the function starts
-        TracingContext.get().guards_context.dynamo_guards.remove_guards_with_source(
-            source
-        )
-        return result
 
     def call_tensor_method(self, tx, args, kwargs):
         return args[0].call_method(tx, self.get_function().__name__, args[1:], kwargs)
