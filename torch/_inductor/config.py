@@ -1862,6 +1862,12 @@ external_matmul: list[Callable[[torch.Tensor, torch.Tensor, torch.Tensor], None]
 # - template_id: Identifier for the template (e.g., "mm", "tma", "decompose_k")
 # - Various template-specific parameters (BLOCK_M, BLOCK_N, etc.)
 #
+# If you want to make sure your lookup table is as stable as possible, you can
+# add 'template_hash' with a hash of the source code for templates that support it
+# e.g. TritonTemplate. The Inductor logs will print the hash of the template source
+# when using the lookup table. If you add a `template_hash` to the config, and it
+# does not match the template source hash at runtime, the config will be filtered out
+#
 # Example:
 # {
 #   "NVIDIA H100+mm+((torch.float16, [128, 64], [64, 1]), (torch.float16, [64, 128], [1, 64]))": [
