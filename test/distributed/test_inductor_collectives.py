@@ -1524,12 +1524,15 @@ class TestCollectivesInductor(DynamoDistributedSingleProcTestCase):
             ag_0_out = torch.ops._c10d_functional.all_gather_into_tensor(
                 ag_0_cast, group_size, group_name
             )
+            ag_0_out = torch.ops.c10d_functional.wait_tensor(ag_0_out)
+            ag_0_out = ag_0_out * 2
+
+            ag_1_cast = ag_1_cast * 2
             ag_1_out = torch.ops._c10d_functional.all_gather_into_tensor(
                 ag_1_cast, group_size, group_name
             )
 
             # wait op
-            ag_0_out = torch.ops.c10d_functional.wait_tensor(ag_0_out)
             ag_1_out = torch.ops.c10d_functional.wait_tensor(ag_1_out)
 
             return y, ag_0_out, ag_1_out
@@ -1542,12 +1545,13 @@ class TestCollectivesInductor(DynamoDistributedSingleProcTestCase):
 
         with torch._inductor.config.patch(
             {
-                "bucket_all_gathers_fx": "fsdp",
+                "bucket_all_gathers_fx": "all",
                 "reorder_for_compute_comm_overlap": False,
             }
         ):
             compiled = torch.compile(func)
             code = run_and_get_triton_code(compiled, *inputs, **self.get_world_trs())
+            print(f"XXX CODE:{code}")
         # NOTE: The first return value should be the output of the first wait_tensor.
         # We want to make sure no unnecessary copy is made.
         (FileCheck().check("all_gather_into_tensor_out").run(code))
@@ -1586,7 +1590,7 @@ class TestCollectivesInductor(DynamoDistributedSingleProcTestCase):
         x = torch.ones(4, 384, device="cuda", dtype=torch.float32)
         w = torch.ones(384, 512, device="cuda", dtype=torch.float32)
         rs_0 = torch.ones(384, 512, device="cuda", dtype=torch.float32)
-        rs_1 = torch.ones(384, 512, device="cuda", dtype=torch.float32)
+        rs_1 = torch.ones(384, 256, device="cuda", dtype=torch.float32)
         inputs = [x, w, rs_0, rs_1]
         func(*inputs, **self.get_world_trs())
 

@@ -57,7 +57,6 @@ def bucket_fsdp_all_gather(
     torch._inductor.config.post_grad_custom_post_pass = _bucket_all_gather
     ```
     """
-
     ag_buckets = bucket_all_gather_by_mb(
         gm,
         all_gather_bucket_cap_mb_callback,
