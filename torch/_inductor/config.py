@@ -1133,7 +1133,7 @@ class cpp:
 
 class triton:
     """
-    Config specific to codegen/triton.py
+    Settings specific to the Triton backend.
     """
 
     # Use cudagraphs on output code
@@ -1336,6 +1336,7 @@ class triton:
     enable_persistent_tma_matmul = (
         os.environ.get("ENABLE_PERSISTENT_TMA_MATMUL", "0") == "1"
     )
+
     # Skip L1 cache for buffers that are used only once.  Disabled by default
     skip_l1_cache = os.environ.get("TORCHINDUCTOR_SKIP_L1", "0") == "1"
 
@@ -1825,6 +1826,68 @@ _cache_config_ignore_prefix: list[str] = [
 
 # External callable for matmul tuning candidates
 external_matmul: list[Callable[[torch.Tensor, torch.Tensor, torch.Tensor], None]] = []
+
+
+# Template config lookup table system for pre-configured kernel template parameters.
+#
+# Replaces default choice generation with pre-configured template parameters for
+# specific operations and input configurations.
+#
+# Behavior:
+# The following behavior happens when the table is set at all, for all operations that support it
+#
+# - Match found: Uses pre-configured choices instead of generating default choices
+# - No match: Skips Triton choice generation entirely, falls back to the provided fallback (now: ATEN)
+#
+# The lookup table sits behind existing settings, specifically backends, and max-autotune. Notably
+# - it will only work when max_autotune(_gemm) is enabled
+#     - it is an error to provide a table when max_autotune is disabled
+# - it will only work if the backend (and template) requested is enabled e.g. triton, decompose_k, etc.
+#     - if the backend/template is not enabled, the lookup table is not consulted for that backend/template
+#
+# Supported: mm, addmm, bmm, mm_plus_mm operations with triton, tma, decompose_k, bias_addmm templates
+#
+# Performance: Autotuning is bypassed when single choice provided or no match (ATEN fallback).
+
+
+# Template lookup table for overriding autotune configs based on input configuration
+# Format: {device_key+op_name+input_key: [{template_id: ..., params...}, ...]}
+#
+# The key is a flattened string with format: "device_key+op_name+input_key"
+# - device_key: CUDA device architecture name (e.g., "NVIDIA H100")
+# - op_name: Operation name (e.g., "mm", "addmm", "bmm")
+# - input_key: String representation of input tensor properties
+#
+# Each value is a list of configuration dictionaries, where each dictionary must contain:
+# - template_id: Identifier for the template (e.g., "mm", "tma", "decompose_k")
+# - Various template-specific parameters (BLOCK_M, BLOCK_N, etc.)
+#
+# Example:
+# {
+#   "NVIDIA H100+mm+((torch.float16, [128, 64], [64, 1]), (torch.float16, [64, 128], [1, 64]))": [
+#     {
+#       "template_id": "mm",
+#       "BLOCK_M": 128,
+#       "BLOCK_N": 128,
+#       "BLOCK_K": 32,
+#       "num_stages": 3,
+#       "num_warps": 8,
+#       "EVEN_K": true,
+#       "ALLOW_TF32": true,
+#       "GROUP_M": 8
+#     },
+#     {
+#       "template_id": "mm_persistent_tma",
+#       "BLOCK_M": 256,
+#       "BLOCK_N": 128,
+#       "BLOCK_K": 64,
+#       "num_stages": 4,
+#       "num_warps": 8,
+#       "ALLOW_TF32": True
+#     },
+#   ]
+# }
+template_lookup_table: Optional[dict[str, list[dict[str, Any]]]] = None
 
 
 class test_configs:
